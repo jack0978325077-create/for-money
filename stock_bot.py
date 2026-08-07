@@ -1,3 +1,13 @@
+import subprocess
+import sys
+
+try:
+    import yfinance as yf
+except ImportError:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "yfinance", "flask", "requests", "gunicorn"]
+    )
+    import yfinance as yf
 import yfinance as yf
 import requests
 from flask import Flask, request, abort
