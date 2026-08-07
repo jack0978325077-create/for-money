@@ -2,3 +2,4 @@ Flask
 yfinance
 line-bot-sdk
 requests
+cachetools
