@@ -19,6 +19,23 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 WATCHLIST_FILE = "watchlist.json"
 
+# 常用股票中文名稱對照表（你可以隨時在這裡新增你常看的股票）
+STOCK_NAMES = {
+    "2330.TW": "台積電",
+    "2454.TW": "聯發科",
+    "00646.TW": "元大標普500",
+    "6189.TW": "豐藝",
+    "3037.TW": "欣興",
+    "2317.TW": "鴻海",
+    # 預設一些常見代號無 .TW 的版本
+    "2330": "台積電",
+    "2454": "聯發科",
+    "00646": "元大標普500",
+    "6189": "豐藝",
+    "3037": "欣興",
+    "2317": "鴻海"
+}
+
 def load_watchlist():
     if os.path.exists(WATCHLIST_FILE):
         with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
@@ -29,31 +46,33 @@ def save_watchlist(watchlist):
     with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
         json.dump(watchlist, f, ensure_ascii=False, indent=4)
 
-# 核心計算與查詢函式（對應圖片中的本益比計算邏輯）
+# 查詢與計算分析函式
 def get_stock_analysis(symbol):
-    if symbol in stock_cache:
-        return stock_cache[symbol]
+    clean_symbol = symbol.upper().strip()
+    if clean_symbol in stock_cache:
+        return stock_cache[clean_symbol]
 
     try:
-        query_symbol = symbol + ".TW" if symbol.isdigit() and not symbol.endswith(".TW") else symbol
+        query_symbol = clean_symbol + ".TW" if clean_symbol.isdigit() and not clean_symbol.endswith(".TW") else clean_symbol
         stock = yf.Ticker(query_symbol)
         
-        # 取得歷史股價（今日收盤價）
+        # 取得中文名稱（優先從對照表找，找不到就用代號）
+        stock_name = STOCK_NAMES.get(query_symbol, STOCK_NAMES.get(clean_symbol, query_symbol))
+        
+        # 取得今日收盤價
         history = stock.history(period="1d")
         if history.empty:
-            return f"找不到代號 {symbol} 的資料。"
+            return f"找不到代號 {clean_symbol} 的資料。"
         current_price = history['Close'].iloc[-1]
         
-        # 嘗試從 yfinance 取得近四季 EPS (Trailing EPS) 與 本益比 (Trailing PE)
+        # 取得 EPS 與 本益比
         info = stock.info
         eps = info.get('trailingEps', None)
         pe_ratio = info.get('trailingPE', None)
         
-        # 如果 yfinance 抓不到現成的 EPS，改從財報季報加總
         if not eps or not pe_ratio:
             quarterly_earnings = stock.quarterly_earnings
             if quarterly_earnings is not None and not quarterly_earnings.empty and 'Earnings' in quarterly_earnings.columns:
-                # 取最近 4 個季度的淨利或 EPS 加總（視 yfinance 回傳格式而定）
                 recent_eps = quarterly_earnings['Earnings'].iloc[-4:].sum()
                 eps = recent_eps if recent_eps > 0 else 1.0
             else:
@@ -64,19 +83,17 @@ def get_stock_analysis(symbol):
         elif not pe_ratio:
             pe_ratio = 0.0
 
-        # 計算近四季 EPS 加總與本益比對應
-        # 依據你的公式：股價 / 近四季 EPS 加總 = 本益比
         calculated_eps_sum = current_price / pe_ratio if pe_ratio > 0 else eps
         
         result_msg = (
-            f"📈 【{query_symbol.upper()} 估值分析】\n"
+            f"📈 【{stock_name} ({query_symbol.upper()})】\n"
             f"• 今日收盤價：{current_price:.2f}\n"
             f"• 近四季 EPS 加總：{calculated_eps_sum:.2f}\n"
             f"• 計算本益比：{pe_ratio:.1f}\n"
             f"  (計算方式: {current_price:.2f} ÷ {calculated_eps_sum:.2f} = {pe_ratio:.1f})"
         )
         
-        stock_cache[symbol] = result_msg
+        stock_cache[clean_symbol] = result_msg
         return result_msg
     except Exception as e:
         return f"暫時無法取得 {symbol} 計算數據，請稍後再試。"
@@ -86,7 +103,7 @@ def get_stock_list():
     if not watchlist:
         return "目前清單是空的。"
     
-    result = "📊 目前追蹤清單與本益比分析：\n"
+    result = "📊 目前追蹤清單與估值分析：\n"
     for symbol in watchlist:
         result += f"\n{get_stock_analysis(symbol)}\n"
     return result.strip()
