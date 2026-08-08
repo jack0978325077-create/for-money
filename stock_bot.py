@@ -8,7 +8,6 @@ from cachetools import TTLCache
 
 app = Flask(__name__)
 
-# 快取設定：最多 100 筆，保留 300 秒 (5分鐘)，避免觸發 Yahoo Limit
 stock_cache = TTLCache(maxsize=100, ttl=300)
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '')
@@ -19,32 +18,20 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 WATCHLIST_FILE = "watchlist.json"
 
-# 中文名稱、代號與 ETF 雙向對照表
 STOCK_MAPPING = {
-    "台積電": "2330.TW",
-    "2330": "2330.TW",
-    "聯發科": "2454.TW",
-    "2454": "2454.TW",
-    "元大標普500": "00646.TW",
-    "00646": "00646.TW",
-    "元大台灣50": "0050.TW",
-    "0050": "0050.TW",
-    "豐藝": "6189.TW",
-    "6189": "6189.TW",
-    "欣興": "3037.TW",
-    "3037": "3037.TW",
-    "鴻海": "2317.TW",
-    "2317": "2317.TW"
+    "台積電": "2330.TW", "2330": "2330.TW",
+    "聯發科": "2454.TW", "2454": "2454.TW",
+    "元大標普500": "00646.TW", "00646": "00646.TW",
+    "元大台灣50": "0050.TW", "0050": "0050.TW",
+    "豐藝": "6189.TW", "6189": "6189.TW",
+    "欣興": "3037.TW", "3037": "3037.TW",
+    "鴻海": "2317.TW", "2317": "2317.TW"
 }
 
 STOCK_NAMES = {
-    "2330.TW": "台積電",
-    "2454.TW": "聯發科",
-    "00646.TW": "元大標普500",
-    "0050.TW": "元大台灣50",
-    "6189.TW": "豐藝",
-    "3037.TW": "欣興",
-    "2317.TW": "鴻海"
+    "2330.TW": "台積電", "2454.TW": "聯發科",
+    "00646.TW": "元大標普500", "0050.TW": "元大台灣50",
+    "6189.TW": "豐藝", "3037.TW": "欣興", "2317.TW": "鴻海"
 }
 
 def load_watchlist():
@@ -59,7 +46,6 @@ def save_watchlist(watchlist):
 
 def get_stock_analysis(user_input):
     clean_input = user_input.strip()
-    
     query_symbol = STOCK_MAPPING.get(clean_input, clean_input.upper())
     if not query_symbol.endswith(".TW") and query_symbol.isdigit():
         query_symbol += ".TW"
@@ -136,13 +122,15 @@ def callback():
                 user_text = event['message']['text'].strip()
                 reply_token = event['replyToken']
                 
-                # 群組嚴格防打擾：必須真正在 LINE 介面中 @ 機器人才會回應
                 is_group = event['source']['type'] != 'user'
                 if is_group:
                     mentions = event['message'].get('mention', {}).get('mentionees', [])
                     is_mentioned = any(m.get('isSelf', False) for m in mentions)
                     if not is_mentioned:
                         continue
+                    # 自動濾掉 @ 標註，只留後面的指令
+                    if " " in user_text:
+                        user_text = user_text.split(" ", 1)[-1].strip()
 
                 watchlist = load_watchlist()
                 response_msg = ""
