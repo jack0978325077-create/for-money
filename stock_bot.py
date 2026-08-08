@@ -8,7 +8,7 @@ from cachetools import TTLCache
 
 app = Flask(__name__)
 
-# 快取設定：最多 100 筆，保留 300 秒 (5分鐘)
+# 快取設定：最多 100 筆，保留 300 秒 (5分鐘)，避免觸發 Yahoo Limit
 stock_cache = TTLCache(maxsize=100, ttl=300)
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '')
@@ -19,7 +19,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 WATCHLIST_FILE = "watchlist.json"
 
-# 支援中文名稱、代號與 ETF 的雙向對照表
+# 中文名稱、代號與 ETF 雙向對照表
 STOCK_MAPPING = {
     "台積電": "2330.TW",
     "2330": "2330.TW",
@@ -37,7 +37,6 @@ STOCK_MAPPING = {
     "2317": "2317.TW"
 }
 
-# 中文名稱對照
 STOCK_NAMES = {
     "2330.TW": "台積電",
     "2454.TW": "聯發科",
@@ -61,7 +60,6 @@ def save_watchlist(watchlist):
 def get_stock_analysis(user_input):
     clean_input = user_input.strip()
     
-    # 轉換代號或中文
     query_symbol = STOCK_MAPPING.get(clean_input, clean_input.upper())
     if not query_symbol.endswith(".TW") and query_symbol.isdigit():
         query_symbol += ".TW"
@@ -73,7 +71,6 @@ def get_stock_analysis(user_input):
         stock = yf.Ticker(query_symbol)
         stock_name = STOCK_NAMES.get(query_symbol, clean_input)
         
-        # 取得今日收盤價
         history = stock.history(period="1d")
         if history.empty:
             return f"找不到代號或名稱為「{clean_input}」的資料。"
@@ -83,7 +80,6 @@ def get_stock_analysis(user_input):
         eps_sum = info.get('trailingEps', 0.0)
         pe_ratio = info.get('trailingPE', 0.0)
         
-        # 如果是個股且 EPS 為 0，嘗試從財報季報計算
         if eps_sum == 0.0:
             try:
                 financials = stock.quarterly_financials
@@ -93,15 +89,12 @@ def get_stock_analysis(user_input):
             except:
                 pass
         
-        # 若依舊沒有 EPS，但有本益比，則透過 本益比 與 股價 反推 EPS
         if eps_sum == 0.0 and pe_ratio > 0:
             eps_sum = current_price / pe_ratio
         
-        # 若有 EPS 但沒有本益比，則計算本益比
         if pe_ratio == 0.0 and eps_sum > 0:
             pe_ratio = current_price / eps_sum
 
-        # 如果 ETF 或個股完全無法取得盈餘數據的應變顯示
         if eps_sum <= 0:
             result_msg = (
                 f"📈 【{stock_name} ({query_symbol.upper()})】\n"
@@ -143,13 +136,13 @@ def callback():
                 user_text = event['message']['text'].strip()
                 reply_token = event['replyToken']
                 
-                # 群組防打擾：在群組中必須包含 "@" 才會回應
+                # 群組嚴格防打擾：必須真正在 LINE 介面中 @ 機器人才會回應
                 is_group = event['source']['type'] != 'user'
                 if is_group:
-                    if "@" not in user_text:
+                    mentions = event['message'].get('mention', {}).get('mentionees', [])
+                    is_mentioned = any(m.get('isSelf', False) for m in mentions)
+                    if not is_mentioned:
                         continue
-                    else:
-                        user_text = user_text.replace("@", "").strip()
 
                 watchlist = load_watchlist()
                 response_msg = ""
