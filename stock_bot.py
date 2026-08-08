@@ -19,83 +19,109 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 WATCHLIST_FILE = "watchlist.json"
 
+# 支援中文名稱、代號與 ETF 的雙向對照表
+STOCK_MAPPING = {
+    "台積電": "2330.TW",
+    "2330": "2330.TW",
+    "聯發科": "2454.TW",
+    "2454": "2454.TW",
+    "元大標普500": "00646.TW",
+    "00646": "00646.TW",
+    "元大台灣50": "0050.TW",
+    "0050": "0050.TW",
+    "豐藝": "6189.TW",
+    "6189": "6189.TW",
+    "欣興": "3037.TW",
+    "3037": "3037.TW",
+    "鴻海": "2317.TW",
+    "2317": "2317.TW"
+}
+
+# 中文名稱對照
 STOCK_NAMES = {
-    "2330.TW": "台積電", "2330": "台積電",
-    "2454.TW": "聯發科", "2454": "聯發科",
-    "00646.TW": "元大標普500", "00646": "元大標普500",
-    "6189.TW": "豐藝", "6189": "豐藝",
-    "3037.TW": "欣興", "3037": "欣興",
-    "2317.TW": "鴻海", "2317": "鴻海"
+    "2330.TW": "台積電",
+    "2454.TW": "聯發科",
+    "00646.TW": "元大標普500",
+    "0050.TW": "元大台灣50",
+    "6189.TW": "豐藝",
+    "3037.TW": "欣興",
+    "2317.TW": "鴻海"
 }
 
 def load_watchlist():
     if os.path.exists(WATCHLIST_FILE):
         with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return ["2330.TW", "2454.TW"]
+    return ["2330.TW", "2454.TW", "00646.TW"]
 
 def save_watchlist(watchlist):
     with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
         json.dump(watchlist, f, ensure_ascii=False, indent=4)
 
-def get_stock_analysis(symbol):
-    clean_symbol = symbol.upper().strip()
-    if clean_symbol in stock_cache:
-        return stock_cache[clean_symbol]
+def get_stock_analysis(user_input):
+    clean_input = user_input.strip()
+    
+    # 轉換代號或中文
+    query_symbol = STOCK_MAPPING.get(clean_input, clean_input.upper())
+    if not query_symbol.endswith(".TW") and query_symbol.isdigit():
+        query_symbol += ".TW"
+
+    if query_symbol in stock_cache:
+        return stock_cache[query_symbol]
 
     try:
-        query_symbol = clean_symbol + ".TW" if clean_symbol.isdigit() and not clean_symbol.endswith(".TW") else clean_symbol
         stock = yf.Ticker(query_symbol)
-        
-        stock_name = STOCK_NAMES.get(query_symbol, STOCK_NAMES.get(clean_symbol, query_symbol))
+        stock_name = STOCK_NAMES.get(query_symbol, clean_input)
         
         # 取得今日收盤價
         history = stock.history(period="1d")
         if history.empty:
-            return f"找不到代號 {clean_symbol} 的資料。"
+            return f"找不到代號或名稱為「{clean_input}」的資料。"
         current_price = history['Close'].iloc[-1]
         
-        # 精確抓取近四季 EPS 加總
-        eps_sum = 0.0
-        try:
-            financials = stock.quarterly_financials
-            # 尋找包含 "Basic EPS" 或 "Diluted EPS" 的列
-            eps_row = None
-            for row in financials.index:
-                if 'EPS' in row or 'Basic EPS' in row or 'Diluted EPS' in row:
-                    eps_row = financials.loc[row]
-                    break
-            
-            if eps_row is not None and not eps_row.empty:
-                # 取最近 4 個季度的數字加總
-                recent_4_eps = eps_row.dropna().iloc[:4]
-                eps_sum = float(recent_4_eps.sum())
-        except:
-            pass
-
-        # 如果從財報抓不到，退回使用 info 內的 trailingEps
-        if eps_sum <= 0:
-            info = stock.info
-            eps_sum = info.get('trailingEps', 0.0)
-
-        # 計算本益比 (股價 / 近四季EPS加總)
-        if eps_sum > 0:
+        info = stock.info
+        eps_sum = info.get('trailingEps', 0.0)
+        pe_ratio = info.get('trailingPE', 0.0)
+        
+        # 如果是個股且 EPS 為 0，嘗試從財報季報計算
+        if eps_sum == 0.0:
+            try:
+                financials = stock.quarterly_financials
+                eps_row = next((financials.loc[row] for row in financials.index if 'EPS' in row), None)
+                if eps_row is not None:
+                    eps_sum = float(eps_row.dropna().iloc[:4].sum())
+            except:
+                pass
+        
+        # 若依舊沒有 EPS，但有本益比，則透過 本益比 與 股價 反推 EPS
+        if eps_sum == 0.0 and pe_ratio > 0:
+            eps_sum = current_price / pe_ratio
+        
+        # 若有 EPS 但沒有本益比，則計算本益比
+        if pe_ratio == 0.0 and eps_sum > 0:
             pe_ratio = current_price / eps_sum
+
+        # 如果 ETF 或個股完全無法取得盈餘數據的應變顯示
+        if eps_sum <= 0:
+            result_msg = (
+                f"📈 【{stock_name} ({query_symbol.upper()})】\n"
+                f"• 今日收盤價：{current_price:.2f}\n"
+                f"• 查無財報盈餘與本益比資料（部分ETF適用）"
+            )
         else:
-            pe_ratio = 0.0
+            result_msg = (
+                f"📈 【{stock_name} ({query_symbol.upper()})】\n"
+                f"• 今日收盤價：{current_price:.2f}\n"
+                f"• 近四季 EPS 加總：{eps_sum:.2f}\n"
+                f"• 計算本益比：{pe_ratio:.1f}\n"
+                f"  (計算方式: {current_price:.2f} ÷ {eps_sum:.2f} = {pe_ratio:.1f})"
+            )
         
-        result_msg = (
-            f"📈 【{stock_name} ({query_symbol.upper()})】\n"
-            f"• 今日收盤價：{current_price:.2f}\n"
-            f"• 近四季 EPS 加總：{eps_sum:.2f}\n"
-            f"• 計算本益比：{pe_ratio:.1f}\n"
-            f"  (計算方式: {current_price:.2f} ÷ {eps_sum:.2f} = {pe_ratio:.1f})"
-        )
-        
-        stock_cache[clean_symbol] = result_msg
+        stock_cache[query_symbol] = result_msg
         return result_msg
     except Exception as e:
-        return f"暫時無法取得 {symbol} 計算數據，請稍後再試。"
+        print(f"DEBUG ERROR: {e}")
+        return f"暫時無法取得「{clean_input}」的計算數據，請稍後再試。"
 
 def get_stock_list():
     watchlist = load_watchlist()
@@ -117,33 +143,45 @@ def callback():
                 user_text = event['message']['text'].strip()
                 reply_token = event['replyToken']
                 
+                # 群組防打擾：在群組中必須包含 "@" 才會回應
+                is_group = event['source']['type'] != 'user'
+                if is_group:
+                    if "@" not in user_text:
+                        continue
+                    else:
+                        user_text = user_text.replace("@", "").strip()
+
                 watchlist = load_watchlist()
                 response_msg = ""
 
                 if user_text == "清單":
                     response_msg = get_stock_list()
                 elif user_text.startswith("新增 "):
-                    new_symbol = user_text.replace("新增 ", "").strip().upper()
+                    target = user_text.replace("新增 ", "").strip()
+                    new_symbol = STOCK_MAPPING.get(target, target.upper())
                     if not new_symbol.endswith(".TW") and new_symbol.isdigit():
                         new_symbol += ".TW"
+                        
                     if new_symbol not in watchlist:
                         watchlist.append(new_symbol)
                         save_watchlist(watchlist)
-                        response_msg = f"✅ 成功新增 {new_symbol} 到清單！"
+                        response_msg = f"✅ 成功新增 {target} ({new_symbol}) 到清單！"
                     else:
-                        response_msg = f"⚠️ {new_symbol} 已經在清單中了。"
+                        response_msg = f"⚠️ {target} 已經在清單中了。"
                 elif user_text.startswith("刪除 "):
-                    del_symbol = user_text.replace("刪除 ", "").strip().upper()
+                    target = user_text.replace("刪除 ", "").strip()
+                    del_symbol = STOCK_MAPPING.get(target, target.upper())
                     if not del_symbol.endswith(".TW") and del_symbol.isdigit():
                         del_symbol += ".TW"
+                        
                     matched = [s for s in watchlist if s.upper() == del_symbol or s.split('.')[0] == del_symbol.split('.')[0]]
                     if matched:
                         for m in matched:
                             watchlist.remove(m)
                         save_watchlist(watchlist)
-                        response_msg = f"🗑️ 成功從清單移除 {del_symbol}！"
+                        response_msg = f"🗑️ 成功從清單移除 {target}！"
                     else:
-                        response_msg = f"⚠️ 找不到 {del_symbol}。"
+                        response_msg = f"⚠️ 找不到 {target}。"
                 else:
                     response_msg = get_stock_analysis(user_text)
 
