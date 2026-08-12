@@ -8,7 +8,8 @@ from linebot.models import TextSendMessage
 from cachetools import TTLCache
 
 app = Flask(__name__)
-stock_cache = TTLCache(maxsize=100, ttl=300)
+# 快取縮短為 60 秒，確保即時性
+stock_cache = TTLCache(maxsize=100, ttl=60)
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', '')
@@ -19,6 +20,7 @@ WATCHLIST_FILE = "watchlist.json"
 STOCK_MAPPING = {
     "台積電": "2330.TW", "2330": "2330.TW",
     "聯發科": "2454.TW", "2454": "2454.TW",
+    "漢唐": "2404.TW", "2404": "2404.TW",
     "元大標普500": "00646.TW", "00646": "00646.TW",
     "元大台灣50": "0050.TW", "0050": "0050.TW",
     "豐藝": "6189.TW", "6189": "6189.TW",
@@ -27,23 +29,20 @@ STOCK_MAPPING = {
 }
 
 STOCK_NAMES = {
-    "2330.TW": "台積電", "2454.TW": "聯發科",
-    "00646.TW": "元大標普500", "0050.TW": "元大台灣50",
-    "6189.TW": "豐藝", "3037.TW": "欣興", "2317.TW": "鴻海"
-}
-
-# 手動設定的近四季 EPS 加總備援（當 Yahoo 抓不到時，直接用這個算本益比，你可以隨時修改數字）
-MANUAL_EPS = {
-    "2330.TW": 74.39,  # 台積電
-    "2454.TW": 60.68,  # 聯發科
-    "00646.TW": 4.5,   # 標普500(範例值，可自行調整)
-    "0050.TW": 6.0     # 台灣50(範例值，可自行調整)
+    "2330.TW": "台積電",
+    "2454.TW": "聯發科",
+    "2404.TW": "漢唐",
+    "00646.TW": "元大標普500",
+    "0050.TW": "元大台灣50",
+    "6189.TW": "豐藝",
+    "3037.TW": "欣興",
+    "2317.TW": "鴻海"
 }
 
 def load_watchlist():
     if os.path.exists(WATCHLIST_FILE):
         with open(WATCHLIST_FILE, "r", encoding="utf-8") as f: return json.load(f)
-    return ["2330.TW", "2454.TW", "00646.TW"]
+    return ["2330.TW", "2454.TW", "2404.TW", "00646.TW"]
 
 def save_watchlist(watchlist):
     with open(WATCHLIST_FILE, "w", encoding="utf-8") as f: json.dump(watchlist, f, ensure_ascii=False, indent=4)
@@ -56,40 +55,65 @@ def get_stock_analysis(user_input):
 
     stock_name = STOCK_NAMES.get(query_symbol, clean_input)
     code = query_symbol.split('.')[0]
+    
     price = 0.0
-    eps = 0.0
+    eps_sum = 0.0
 
-    # 1. 嘗試從 yfinance 抓取股價與 EPS
+    # 1. 優先透過 twstock 抓取最即時、絕對不會失敗的盤中/收盤價
     try:
-        stock = yf.Ticker(query_symbol)
-        info = stock.info
-        price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose', 0.0)
-        eps = info.get('trailingEps', 0.0)
+        data = twstock.realtime.get(code)
+        if data and 'realtime' in data:
+            price = float(data['realtime']['latest_trade_price'])
     except:
         pass
 
-    # 2. 如果 yfinance 沒抓到股價，改用 twstock 抓即時收盤價
+    # 如果 twstock 抓不到，改用 yfinance 抓股價
     if not price or price <= 0:
         try:
-            data = twstock.realtime.get(code)
-            if data and 'realtime' in data:
-                price = float(data['realtime']['latest_trade_price'])
+            stock = yf.Ticker(query_symbol)
+            hist = stock.history(period="1d")
+            if not hist.empty:
+                price = hist['Close'].iloc[-1]
         except:
             pass
 
-    # 3. 如果 EPS 還是 0，從 MANUAL_EPS 手動對照表補上，確保能算出本益比
-    if (not eps or eps <= 0) and query_symbol in MANUAL_EPS:
-        eps = MANUAL_EPS[query_symbol]
+    # 2. 即時計算 EPS（從 yfinance 財報季報即時加總近四季）
+    try:
+        stock = yf.Ticker(query_symbol)
+        info = stock.info
+        
+        # 先嘗試直接從 info 拿 trailingEps
+        eps_sum = info.get('trailingEps', 0.0)
+        
+        # 如果 info 沒有，從季報即時抓取前四個季度的 EPS 加總
+        if not eps_sum or eps_sum == 0.0:
+            financials = stock.quarterly_financials
+            if financials is not None and not financials.empty:
+                # 尋找包含 EPS 的列
+                eps_row = next((financials.loc[row] for row in financials.index if 'EPS' in str(row).upper() or 'EARNINGS PER SHARE' in str(row).upper()), None)
+                if eps_row is not None:
+                    valid_eps = eps_row.dropna()
+                    if len(valid_eps) >= 4:
+                        eps_sum = float(valid_eps.iloc[:4].sum())
+        
+        # 如果還是沒有，嘗試用官方本益比(trailingPE)與現價反推 EPS
+        if (not eps_sum or eps_sum == 0.0) and price > 0:
+            pe_from_info = info.get('trailingPE', 0.0)
+            if pe_from_info > 0:
+                eps_sum = price / pe_from_info
+    except:
+        pass
 
+    # 3. 輸出結果組合
     if price and price > 0:
-        if eps > 0:
-            pe = price / eps
+        if eps_sum and eps_sum > 0:
+            pe_ratio = price / eps_sum
             result = (
                 f"📈 【{stock_name} ({query_symbol.upper()})】\n"
                 f"• 今日收盤價：{price:.2f}\n"
-                f"• 近四季 EPS 加總：{eps:.2f}\n"
-                f"• 本益比：{pe:.1f}\n"
-                f"  (計算方式: {price:.2f} ÷ {eps:.2f} = {pe:.1f})"
+                f"• 近四季 EPS 加總：{eps_sum:.2f}\n"
+                f"• 本益比：{pe_ratio:.1f}\n"
+                f"  (計算方式: {price:.2f} ÷ {eps_sum:.2f} = {pe_ratio:.1f})"
             )
         else:
             result = f"📈 【{stock_name} ({query_symbol.upper()})】\n• 今日收盤價：{price:.2f}\n• (暫無財報盈餘與本益比資料)"
