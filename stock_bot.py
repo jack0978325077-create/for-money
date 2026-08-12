@@ -32,6 +32,14 @@ STOCK_NAMES = {
     "6189.TW": "豐藝", "3037.TW": "欣興", "2317.TW": "鴻海"
 }
 
+# 手動設定的近四季 EPS 加總備援（當 Yahoo 抓不到時，直接用這個算本益比，你可以隨時修改數字）
+MANUAL_EPS = {
+    "2330.TW": 74.39,  # 台積電
+    "2454.TW": 60.68,  # 聯發科
+    "00646.TW": 4.5,   # 標普500(範例值，可自行調整)
+    "0050.TW": 6.0     # 台灣50(範例值，可自行調整)
+}
+
 def load_watchlist():
     if os.path.exists(WATCHLIST_FILE):
         with open(WATCHLIST_FILE, "r", encoding="utf-8") as f: return json.load(f)
@@ -48,35 +56,46 @@ def get_stock_analysis(user_input):
 
     stock_name = STOCK_NAMES.get(query_symbol, clean_input)
     code = query_symbol.split('.')[0]
+    price = 0.0
+    eps = 0.0
 
-    # --- 強制執行查詢 ---
+    # 1. 嘗試從 yfinance 抓取股價與 EPS
     try:
         stock = yf.Ticker(query_symbol)
         info = stock.info
-        # 直接抓取官方提供的數據，最穩定
-        price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
-        eps = info.get('trailingEps') or 0.0
-        pe = info.get('trailingPE') or 0.0
+        price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose', 0.0)
+        eps = info.get('trailingEps', 0.0)
+    except:
+        pass
+
+    # 2. 如果 yfinance 沒抓到股價，改用 twstock 抓即時收盤價
+    if not price or price <= 0:
+        try:
+            data = twstock.realtime.get(code)
+            if data and 'realtime' in data:
+                price = float(data['realtime']['latest_trade_price'])
+        except:
+            pass
+
+    # 3. 如果 EPS 還是 0，從 MANUAL_EPS 手動對照表補上，確保能算出本益比
+    if (not eps or eps <= 0) and query_symbol in MANUAL_EPS:
+        eps = MANUAL_EPS[query_symbol]
+
+    if price and price > 0:
+        if eps > 0:
+            pe = price / eps
+            result = (
+                f"📈 【{stock_name} ({query_symbol.upper()})】\n"
+                f"• 今日收盤價：{price:.2f}\n"
+                f"• 近四季 EPS 加總：{eps:.2f}\n"
+                f"• 本益比：{pe:.1f}\n"
+                f"  (計算方式: {price:.2f} ÷ {eps:.2f} = {pe:.1f})"
+            )
+        else:
+            result = f"📈 【{stock_name} ({query_symbol.upper()})】\n• 今日收盤價：{price:.2f}\n• (暫無財報盈餘與本益比資料)"
         
-        # 強制計算邏輯
-        if eps > 0 and pe == 0: pe = price / eps
-        if pe > 0 and eps == 0: eps = price / pe
-
-        if eps > 0 and price:
-            result = f"📈 【{stock_name} ({query_symbol.upper()})】\n• 今日收盤價：{price:.2f}\n• 近四季 EPS 加總：{eps:.2f}\n• 本益比：{pe:.1f}\n  (計算方式: {price:.2f} ÷ {eps:.2f} = {pe:.1f})"
-            stock_cache[query_symbol] = result
-            return result
-    except: pass
-
-    # --- 備援機制 ---
-    try:
-        data = twstock.realtime.get(code)
-        if data and 'realtime' in data:
-            price = float(data['realtime']['latest_trade_price'])
-            result = f"📈 【{stock_name} ({code})】\n• 今日收盤價：{price:.2f}\n• (暫無財報盈餘與本益比資料)"
-            stock_cache[query_symbol] = result
-            return result
-    except: pass
+        stock_cache[query_symbol] = result
+        return result
 
     return f"暫時無法取得「{clean_input}」的數據。"
 
