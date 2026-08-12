@@ -55,9 +55,7 @@ def get_stock_analysis(user_input):
         return stock_cache[query_symbol]
 
     stock_name = STOCK_NAMES.get(query_symbol, clean_input)
-    code = query_symbol.split('.')[0]
-
-    # --- 來源一：嘗試使用 yfinance (支援 EPS 與本益比計算) ---
+    
     try:
         stock = yf.Ticker(query_symbol)
         history = stock.history(period="1d")
@@ -65,8 +63,8 @@ def get_stock_analysis(user_input):
             current_price = history['Close'].iloc[-1]
             info = stock.info
             eps_sum = info.get('trailingEps', 0.0)
-            pe_ratio = info.get('trailingPE', 0.0)
             
+            # 嘗試補強 EPS 加總
             if eps_sum == 0.0:
                 try:
                     financials = stock.quarterly_financials
@@ -76,112 +74,22 @@ def get_stock_analysis(user_input):
                 except:
                     pass
             
-            if eps_sum == 0.0 and pe_ratio > 0:
-                eps_sum = current_price / pe_ratio
+            # 計算本益比
+            pe_ratio = current_price / eps_sum if eps_sum > 0 else 0.0
             
-            if pe_ratio == 0.0 and eps_sum > 0:
-                pe_ratio = current_price / eps_sum
-
-            if eps_sum > 0:
-                result_msg = (
-                    f"📈 【{stock_name} ({query_symbol.upper()})】\n"
-                    f"• 今日收盤價：{current_price:.2f}\n"
-                    f"• 近四季 EPS 加總：{eps_sum:.2f}\n"
-                    f"• 計算本益比：{pe_ratio:.1f}\n"
-                    f"  (計算方式: {current_price:.2f} ÷ {eps_sum:.2f} = {pe_ratio:.1f})"
-                )
-                stock_cache[query_symbol] = result_msg
-                return result_msg
-    except Exception as e:
-        print(f"yfinance failed: {e}")
-
-    # --- 來源二：備援機制 twstock (當 Yahoo 失敗時自動啟動) ---
-    try:
-        realtime = twstock.realtime.get(code)
-        if realtime and 'realtime' in realtime:
-            current_price = float(realtime['realtime']['latest_trade_price'])
+            # 嚴格依照你要求的計算格式輸出
             result_msg = (
-                f"📈 【{stock_name} ({code})】\n"
-                f"• 目前市價：{current_price:.2f}\n"
-                f"• 來源：TWSE 備援通道\n"
-                f"  (註：目前 Yahoo 數據限流，僅提供即時報價)"
+                f"📈 【{stock_name} ({query_symbol.upper()})】\n"
+                f"• 今日收盤價：{current_price:.2f}\n"
+                f"• 近四季 EPS 加總：{eps_sum:.2f}\n"
+                f"• 本益比：{pe_ratio:.1f}\n"
+                f"  (計算方式: {current_price:.2f} ÷ {eps_sum:.2f} = {pe_ratio:.1f})"
             )
+            
             stock_cache[query_symbol] = result_msg
             return result_msg
     except Exception as e:
-        print(f"twstock failed: {e}")
+        print(f"DEBUG ERROR: {e}")
+        return f"無法取得「{clean_input}」的數據。"
 
-    return f"暫時無法取得「{clean_input}」的計算數據，請稍後再試。"
-
-def get_stock_list():
-    watchlist = load_watchlist()
-    if not watchlist:
-        return "目前清單是空的。"
-    
-    result = "📊 目前追蹤清單與估值分析：\n"
-    for symbol in watchlist:
-        result += f"\n{get_stock_analysis(symbol)}\n"
-    return result.strip()
-
-@app.route("/callback", methods=['POST'])
-def callback():
-    body = request.get_data(as_text=True)
-    try:
-        data = json.loads(body)
-        for event in data.get('events', []):
-            if event['type'] == 'message' and event['message']['type'] == 'text':
-                user_text = event['message']['text'].strip()
-                reply_token = event['replyToken']
-                
-                is_group = event['source']['type'] != 'user'
-                if is_group:
-                    mentions = event['message'].get('mention', {}).get('mentionees', [])
-                    is_mentioned = any(m.get('isSelf', False) for m in mentions)
-                    if not is_mentioned:
-                        continue
-                    if " " in user_text:
-                        user_text = user_text.split(" ", 1)[-1].strip()
-
-                watchlist = load_watchlist()
-                response_msg = ""
-
-                if user_text == "清單":
-                    response_msg = get_stock_list()
-                elif user_text.startswith("新增 "):
-                    target = user_text.replace("新增 ", "").strip()
-                    new_symbol = STOCK_MAPPING.get(target, target.upper())
-                    if not new_symbol.endswith(".TW") and new_symbol.isdigit():
-                        new_symbol += ".TW"
-                        
-                    if new_symbol not in watchlist:
-                        watchlist.append(new_symbol)
-                        save_watchlist(watchlist)
-                        response_msg = f"✅ 成功新增 {target} ({new_symbol}) 到清單！"
-                    else:
-                        response_msg = f"⚠️ {target} 已經在清單中了。"
-                elif user_text.startswith("刪除 "):
-                    target = user_text.replace("刪除 ", "").strip()
-                    del_symbol = STOCK_MAPPING.get(target, target.upper())
-                    if not del_symbol.endswith(".TW") and del_symbol.isdigit():
-                        del_symbol += ".TW"
-                        
-                    matched = [s for s in watchlist if s.upper() == del_symbol or s.split('.')[0] == del_symbol.split('.')[0]]
-                    if matched:
-                        for m in matched:
-                            watchlist.remove(m)
-                        save_watchlist(watchlist)
-                        response_msg = f"🗑️ 成功從清單移除 {target}！"
-                    else:
-                        response_msg = f"⚠️ 找不到 {target}。"
-                else:
-                    response_msg = get_stock_analysis(user_text)
-
-                line_bot_api.reply_message(reply_token, TextSendMessage(text=response_msg))
-    except Exception as e:
-        print(f"Error: {e}")
-
-    return 'OK'
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    return f"暫時無法取得「{clean_input}」的計算數據。"
