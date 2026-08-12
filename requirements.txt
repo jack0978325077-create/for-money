@@ -1,5 +1,6 @@
-Flask
+# 這是你需要貼在 requirements.txt 裡的內容
+flask
 yfinance
 line-bot-sdk
-requests
 cachetools
+twstock

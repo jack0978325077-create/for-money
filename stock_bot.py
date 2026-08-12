@@ -2,6 +2,7 @@ import os
 import json
 from flask import Flask, request
 import yfinance as yf
+import twstock
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import TextSendMessage
 from cachetools import TTLCache
@@ -53,54 +54,64 @@ def get_stock_analysis(user_input):
     if query_symbol in stock_cache:
         return stock_cache[query_symbol]
 
+    stock_name = STOCK_NAMES.get(query_symbol, clean_input)
+    code = query_symbol.split('.')[0]
+
+    # --- 來源一：嘗試使用 yfinance (支援 EPS 與本益比計算) ---
     try:
         stock = yf.Ticker(query_symbol)
-        stock_name = STOCK_NAMES.get(query_symbol, clean_input)
-        
         history = stock.history(period="1d")
-        if history.empty:
-            return f"找不到代號或名稱為「{clean_input}」的資料。"
-        current_price = history['Close'].iloc[-1]
-        
-        info = stock.info
-        eps_sum = info.get('trailingEps', 0.0)
-        pe_ratio = info.get('trailingPE', 0.0)
-        
-        if eps_sum == 0.0:
-            try:
-                financials = stock.quarterly_financials
-                eps_row = next((financials.loc[row] for row in financials.index if 'EPS' in row), None)
-                if eps_row is not None:
-                    eps_sum = float(eps_row.dropna().iloc[:4].sum())
-            except:
-                pass
-        
-        if eps_sum == 0.0 and pe_ratio > 0:
-            eps_sum = current_price / pe_ratio
-        
-        if pe_ratio == 0.0 and eps_sum > 0:
-            pe_ratio = current_price / eps_sum
+        if not history.empty:
+            current_price = history['Close'].iloc[-1]
+            info = stock.info
+            eps_sum = info.get('trailingEps', 0.0)
+            pe_ratio = info.get('trailingPE', 0.0)
+            
+            if eps_sum == 0.0:
+                try:
+                    financials = stock.quarterly_financials
+                    eps_row = next((financials.loc[row] for row in financials.index if 'EPS' in row), None)
+                    if eps_row is not None:
+                        eps_sum = float(eps_row.dropna().iloc[:4].sum())
+                except:
+                    pass
+            
+            if eps_sum == 0.0 and pe_ratio > 0:
+                eps_sum = current_price / pe_ratio
+            
+            if pe_ratio == 0.0 and eps_sum > 0:
+                pe_ratio = current_price / eps_sum
 
-        if eps_sum <= 0:
-            result_msg = (
-                f"📈 【{stock_name} ({query_symbol.upper()})】\n"
-                f"• 今日收盤價：{current_price:.2f}\n"
-                f"• 查無財報盈餘與本益比資料（部分ETF適用）"
-            )
-        else:
-            result_msg = (
-                f"📈 【{stock_name} ({query_symbol.upper()})】\n"
-                f"• 今日收盤價：{current_price:.2f}\n"
-                f"• 近四季 EPS 加總：{eps_sum:.2f}\n"
-                f"• 計算本益比：{pe_ratio:.1f}\n"
-                f"  (計算方式: {current_price:.2f} ÷ {eps_sum:.2f} = {pe_ratio:.1f})"
-            )
-        
-        stock_cache[query_symbol] = result_msg
-        return result_msg
+            if eps_sum > 0:
+                result_msg = (
+                    f"📈 【{stock_name} ({query_symbol.upper()})】\n"
+                    f"• 今日收盤價：{current_price:.2f}\n"
+                    f"• 近四季 EPS 加總：{eps_sum:.2f}\n"
+                    f"• 計算本益比：{pe_ratio:.1f}\n"
+                    f"  (計算方式: {current_price:.2f} ÷ {eps_sum:.2f} = {pe_ratio:.1f})"
+                )
+                stock_cache[query_symbol] = result_msg
+                return result_msg
     except Exception as e:
-        print(f"DEBUG ERROR: {e}")
-        return f"暫時無法取得「{clean_input}」的計算數據，請稍後再試。"
+        print(f"yfinance failed: {e}")
+
+    # --- 來源二：備援機制 twstock (當 Yahoo 失敗時自動啟動) ---
+    try:
+        realtime = twstock.realtime.get(code)
+        if realtime and 'realtime' in realtime:
+            current_price = float(realtime['realtime']['latest_trade_price'])
+            result_msg = (
+                f"📈 【{stock_name} ({code})】\n"
+                f"• 目前市價：{current_price:.2f}\n"
+                f"• 來源：TWSE 備援通道\n"
+                f"  (註：目前 Yahoo 數據限流，僅提供即時報價)"
+            )
+            stock_cache[query_symbol] = result_msg
+            return result_msg
+    except Exception as e:
+        print(f"twstock failed: {e}")
+
+    return f"暫時無法取得「{clean_input}」的計算數據，請稍後再試。"
 
 def get_stock_list():
     watchlist = load_watchlist()
@@ -128,7 +139,6 @@ def callback():
                     is_mentioned = any(m.get('isSelf', False) for m in mentions)
                     if not is_mentioned:
                         continue
-                    # 自動濾掉 @ 標註，只留後面的指令
                     if " " in user_text:
                         user_text = user_text.split(" ", 1)[-1].strip()
 
