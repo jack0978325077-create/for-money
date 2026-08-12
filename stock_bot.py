@@ -54,7 +54,9 @@ def get_stock_analysis(user_input):
         return stock_cache[query_symbol]
 
     stock_name = STOCK_NAMES.get(query_symbol, clean_input)
-    
+    code = query_symbol.split('.')[0]
+
+    # --- 來源一：嘗試使用 yfinance ---
     try:
         stock = yf.Ticker(query_symbol)
         history = stock.history(period="1d")
@@ -63,32 +65,42 @@ def get_stock_analysis(user_input):
             info = stock.info
             eps_sum = info.get('trailingEps', 0.0)
             
+            # 補強 EPS 加總
             if eps_sum == 0.0:
-                try:
-                    financials = stock.quarterly_financials
+                financials = stock.quarterly_financials
+                if financials is not None and not financials.empty:
                     eps_row = next((financials.loc[row] for row in financials.index if 'EPS' in row), None)
                     if eps_row is not None:
                         eps_sum = float(eps_row.dropna().iloc[:4].sum())
-                except:
-                    pass
             
             pe_ratio = current_price / eps_sum if eps_sum > 0 else 0.0
             
-            result_msg = (
-                f"📈 【{stock_name} ({query_symbol.upper()})】\n"
-                f"• 今日收盤價：{current_price:.2f}\n"
-                f"• 近四季 EPS 加總：{eps_sum:.2f}\n"
-                f"• 本益比：{pe_ratio:.1f}\n"
-                f"  (計算方式: {current_price:.2f} ÷ {eps_sum:.2f} = {pe_ratio:.1f})"
-            )
-            
+            if eps_sum > 0:
+                result_msg = (
+                    f"📈 【{stock_name} ({query_symbol.upper()})】\n"
+                    f"• 今日收盤價：{current_price:.2f}\n"
+                    f"• 近四季 EPS 加總：{eps_sum:.2f}\n"
+                    f"• 本益比：{pe_ratio:.1f}\n"
+                    f"  (計算方式: {current_price:.2f} ÷ {eps_sum:.2f} = {pe_ratio:.1f})"
+                )
+                stock_cache[query_symbol] = result_msg
+                return result_msg
+    except:
+        pass # 失敗自動往下走
+
+    # --- 來源二：強制備援機制 (twstock) ---
+    try:
+        realtime = twstock.realtime.get(code)
+        if realtime and 'realtime' in realtime:
+            current_price = float(realtime['realtime']['latest_trade_price'])
+            # 備援時無法精確算出 EPS 和本益比，回傳市價供參考
+            result_msg = f"📈 【{stock_name} ({code})】\n• 今日收盤價：{current_price:.2f}\n• (暫無財報數據)"
             stock_cache[query_symbol] = result_msg
             return result_msg
-    except Exception as e:
-        print(f"DEBUG ERROR: {e}")
-        return f"暫時無法取得「{clean_input}」的數據。"
+    except:
+        pass
 
-    return f"暫時無法取得「{clean_input}」的計算數據。"
+    return f"暫時無法取得「{clean_input}」的數據。"
 
 def get_stock_list():
     watchlist = load_watchlist()
